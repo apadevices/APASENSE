@@ -2,7 +2,7 @@
 #include <Arduino.h>
 
 // ── Version ──────────────────────────────────────────────────────────────────
-#define APASENSE_LIB_VERSION "1.0.0"
+#define APASENSE_LIB_VERSION "1.1.0"
 
 // ── EEPROM ───────────────────────────────────────────────────────────────────
 // APA EEPROM map: 520–531 APAPUMP | 532–581 APAPUMP reserve | 582–587 APASENSE
@@ -11,17 +11,28 @@ constexpr uint16_t APASENSE_EEPROM_MAGIC   = 0xA5C2;
 constexpr uint8_t  APASENSE_EEPROM_VERSION = 1;
 
 // ── ADS1015 ──────────────────────────────────────────────────────────────────
-constexpr uint8_t  APASENSE_RMS_SAMPLES        = 32;    // samples per RMS calculation
-constexpr float    APASENSE_ADS_LSB_MV         = 3.0f;  // mV/LSB at ±6.144V gain, 12-bit
-constexpr float    APASENSE_DEFAULT_MAX_BAR    = 6.9f;  // ≈100 PSI default pressure range
-constexpr float    APASENSE_DEFAULT_CURR_SENS  = 0.100f; // ACS712-20A: 100 mV/A
+constexpr uint8_t  APASENSE_RMS_SAMPLES       = 32;    // samples per RMS calculation
+constexpr float    APASENSE_ADS_LSB_MV        = 3.0f;  // mV/LSB at ±6.144V gain, 12-bit
+constexpr float    APASENSE_DEFAULT_MAX_BAR   = 6.9f;  // ≈100 PSI default pressure range
+constexpr float    APASENSE_DEFAULT_CURR_SENS = 0.100f; // ACS712-20A: 100 mV/A
 
 // ── Pressure ─────────────────────────────────────────────────────────────────
 constexpr uint16_t APASENSE_PRESSURE_SETTLE_MS = 30000; // settle after pump stop → re-zero
 
+// ── Mains voltage helpers ─────────────────────────────────────────────────────
+constexpr float APASENSE_MAINS_EU = 230.0f; // European standard
+constexpr float APASENSE_MAINS_US = 120.0f; // US / Canada standard
+
 // ── Sentinels ────────────────────────────────────────────────────────────────
-constexpr uint8_t  APASENSE_NO_PCF    = 0xFF; // pcfAddr=0xFF → no PCF hardware
-constexpr uint8_t  APASENSE_NO_BUZZER = 0xFF; // buzzerPin=0xFF → buzzer not configured
+constexpr uint8_t APASENSE_NO_PCF    = 0xFF; // pcfAddr=0xFF → no PCF hardware
+constexpr uint8_t APASENSE_NO_BUZZER = 0xFF; // buzzerPin=0xFF → buzzer not configured
+
+// ── Buzzer alert severity ─────────────────────────────────────────────────────
+enum BuzzerAlert : uint8_t {
+    BUZZER_INFO    = 0, // single beep  (200ms on · 800ms off)
+    BUZZER_WARNING = 1, // double beep  (200ms·150ms gap·200ms · 2s silence)
+    BUZZER_ALARM   = 2  // triple beep  (150ms×3 · 100ms gaps · 1.5s silence)
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -34,11 +45,13 @@ public:
 
     // ── Core ─────────────────────────────────────────────────────────────────
     void begin();   // Wire.begin(), init ADS + PCF, auto-zero current
-    void update();  // non-blocking: ADC cycle, RMS accum, beep timer, settle timer
+    void update();  // non-blocking: ADC cycle, RMS accum, buzzer sequencer, settle timer
 
     // ── ADS1015 channels — opt-in, all disabled by default ───────────────────
     void enablePressure(uint8_t channel = 0, float maxBar = APASENSE_DEFAULT_MAX_BAR);
-    void enableCurrent(uint8_t channel = 1, float sensitivity = APASENSE_DEFAULT_CURR_SENS);
+    void enableCurrent(uint8_t channel = 1,
+                       float sensitivity = APASENSE_DEFAULT_CURR_SENS,
+                       float voltageV = 0.0f);          // voltageV > 0 enables getPower()
     void enableAux(uint8_t channel = 2);
     void enableLDR(uint8_t channel = 3, int16_t rawDark = 0, int16_t rawSun = 1667);
     // rawDark/rawSun: hardcode from calibration example; defaults give raw ADC ratio
@@ -46,6 +59,8 @@ public:
     // ── Getters ───────────────────────────────────────────────────────────────
     float   getPressure()   const; // bar, ≥0.0f; -1.0f if not enabled/calibrated
     float   getCurrent()    const; // amps RMS; -1.0f if not enabled/calibrated
+    float   getPower()      const; // apparent power VA = voltageV × I_rms; -1.0f if not configured
+                                   // note: true watts = VA × power factor (≈0.85–0.95 for pumps)
     float   getAuxVoltage() const; // volts 0.0–5.0; 0.0f if not enabled
     float   getSolarPct()   const; // 0–100%; -1.0f if not enabled or rawDark==rawSun
     int16_t getRawLDR()     const; // raw ADC count — use in calibration sketch
@@ -64,8 +79,10 @@ public:
 
     // ── Buzzer ────────────────────────────────────────────────────────────────
     void enableBuzzer(uint8_t pin);
-    void setBuzzer(bool on);      // direct on/off; cancels pending beep
-    void beep(uint16_t ms);       // non-blocking single beep; 0 = no-op
+    void setBuzzer(bool on);                            // direct on/off; cancels any pattern
+    void beep(uint16_t ms);                             // non-blocking single beep; 0 = no-op
+    void alert(BuzzerAlert severity, bool repeat = false); // play rhythm pattern
+    void stopAlert();                                   // stop repeating pattern
 
 private:
     // ── I2C addresses ─────────────────────────────────────────────────────────
@@ -84,6 +101,7 @@ private:
     // ── Channel parameters ────────────────────────────────────────────────────
     float _pressureMaxBar;
     float _currentSensitivity;
+    float _mainsVoltage;    // 0.0f = not configured; >0 enables getPower()
 
     // ── Cached ADC readings (raw counts, converted in getter) ─────────────────
     int16_t _rawPressure;
@@ -101,7 +119,9 @@ private:
 
     // ── Buzzer ────────────────────────────────────────────────────────────────
     uint8_t  _buzzerPin;
-    uint32_t _beepEndMs;
+    uint8_t  _buzzerPattern;    // active pattern index (BuzzerAlert), 0xFF = none
+    uint8_t  _buzzerStep;       // current step within pattern, 0xFF = idle/simple-beep mode
+    uint32_t _buzzerStepEndMs;  // end time for current step (on or off phase)
 
     // ── Pressure settle ───────────────────────────────────────────────────────
     uint32_t _settleStartMs;
@@ -111,7 +131,7 @@ private:
     uint8_t  _adsCh;         // next sensor index to sample (0=pressure,1=current,2=aux,3=ldr)
     uint16_t _adsConvMs16;   // low 16 bits of millis() when conversion was started
 
-    // ── Flags (10 bits = 2 bytes) ─────────────────────────────────────────────
+    // ── Flags (12 bits = 2 bytes) ─────────────────────────────────────────────
     struct {
         bool pressureEnabled    : 1;
         bool currentEnabled     : 1;
@@ -123,6 +143,8 @@ private:
         bool settlePending      : 1;
         bool adsReady           : 1;
         bool pcfReady           : 1;
+        bool buzzerRepeat       : 1; // alert() repeat flag
+        bool buzzerOnPhase      : 1; // true = currently in ON phase of a pattern step
     } _flags;
 
     // ── Private helpers ───────────────────────────────────────────────────────
@@ -139,4 +161,5 @@ private:
     void     _writePCF();
     void     _loadEEPROM();
     void     _saveEEPROM();
+    void     _advanceBuzzerPattern(uint32_t now); // drives pattern step sequencer
 };
