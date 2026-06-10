@@ -46,8 +46,9 @@ void setup() {
     Serial.begin(115200);
 
     // ── APASENSE — configure all channels BEFORE begin() ────────────────
-    adc.enablePressure();                     // AIN0, 0–6.9 bar
-    adc.enableCurrent();                      // AIN1, ACS712-20A
+    adc.enablePressure();                             // AIN0, 0–6.9 bar
+    adc.enableCurrent(1, APASENSE_DEFAULT_CURR_SENS,
+                      APASENSE_MAINS_EU);             // AIN1, ACS712-20A + power calc
     adc.enableLDR(3, LDR_DARK, LDR_SUN);     // AIN3, solar irradiance
 
     adc.enableTankSensor(0);                  // P0 — pH tank
@@ -71,10 +72,12 @@ void setup() {
     pump.setPumpStateCallback([](bool on) { adc.onPumpState(on); });
 
     // ── APAPUMP → APASENSE: alarm → indicators ───────────────────────────
+    // BUZZER_ALARM repeats until stopAlert() is called when alarm clears.
     pump.setPumpAlarmCallback([](PumpAlarm a) {
         bool alarm = (a != PUMP_ALARM_NONE);
         adc.setLed(LED_ALARM, alarm);
-        if (alarm) adc.beep(1000);
+        if (alarm) adc.alert(BUZZER_ALARM, true);
+        else        adc.stopAlert();
     });
 
     // ── APAPUMP: schedule, solar, freeze, etc. ───────────────────────────
@@ -110,23 +113,28 @@ void loop() {
     if (millis() - lastPrint >= 5000) {
         lastPrint = millis();
 
-        float p = adc.getPressure();
-        float i = adc.getCurrent();
-        float s = adc.getSolarPct();
+        float p  = adc.getPressure();
+        float i  = adc.getCurrent();
+        float va = adc.getPower();
+        float s  = adc.getSolarPct();
 
-        Serial.print(F("Pressure: "));
-        if (p < 0) Serial.print(F("  --  "));
-        else { Serial.print(p, 2); Serial.print(F(" bar ")); }
+        Serial.print(F("P:"));
+        if (p < 0) Serial.print(F("  -- "));
+        else { Serial.print(p, 2); Serial.print(F("bar ")); }
 
-        Serial.print(F(" Current: "));
-        if (i < 0) Serial.print(F("  --  "));
-        else { Serial.print(i, 2); Serial.print(F(" A   ")); }
+        Serial.print(F(" I:"));
+        if (i < 0) Serial.print(F(" -- "));
+        else { Serial.print(i, 2); Serial.print(F("A ")); }
 
-        Serial.print(F(" Solar: "));
+        Serial.print(F(" VA:"));
+        if (va < 0) Serial.print(F(" -- "));
+        else { Serial.print(va, 0); Serial.print(F(" ")); }
+
+        Serial.print(F(" Sun:"));
         if (s < 0) Serial.print(F(" -- "));
-        else { Serial.print(s, 0); Serial.print(F("%  ")); }
+        else { Serial.print(s, 0); Serial.print(F("% ")); }
 
-        Serial.print(F("  Pump: "));
+        Serial.print(F(" Pump:"));
         Serial.println(pump.isRunning() ? F("ON") : F("off"));
     }
 }
