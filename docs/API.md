@@ -1,6 +1,6 @@
 # APASENSE — API Reference
 
-**Version 1.0.0** · [GitHub](https://github.com/apadevices/APASENSE)
+**Version 1.1.0** · [GitHub](https://github.com/apadevices/APASENSE)
 
 ---
 
@@ -12,16 +12,17 @@
 ApaSense adc;              // ADS1015=0x4B, PCF8574AT=0x3B (hardware defaults)
 
 void setup() {
-    adc.enablePressure();  // enable channels BEFORE begin()
-    adc.enableCurrent();
+    adc.enablePressure();
+    adc.enableCurrent(1, APASENSE_DEFAULT_CURR_SENS, APASENSE_MAINS_EU); // enable power calc
     adc.begin();           // initialises I2C, zeroes current sensor
 }
 
 void loop() {
     adc.update();          // call every loop() — never use delay()
 
-    float bar  = adc.getPressure();   // -1.0 until calibrated
-    float amps = adc.getCurrent();    // -1.0 until 32 samples collected
+    float bar   = adc.getPressure();   // bar — -1.0 until calibrated
+    float amps  = adc.getCurrent();    // A RMS — -1.0 until 32 samples collected
+    float va    = adc.getPower();      // apparent power VA — -1.0 if voltage not set
 }
 ```
 
@@ -85,7 +86,7 @@ void update();
 Advances all non-blocking state machines. **Must be called every `loop()` iteration.** Never use `delay()` in a sketch that uses APASENSE.
 
 Each `update()` call:
-1. Checks and fires the beep timer
+1. Advances the buzzer sequencer — progresses active `alert()` pattern one step, or turns off a `beep()` when its timer expires
 2. Checks and fires the 30-second pressure settle timer
 3. Reads a completed ADC conversion (if 1 ms has elapsed since it started)
 4. Starts the next ADC conversion on the next enabled sensor
@@ -113,7 +114,9 @@ The sensor must be a 0.5–4.5 V ratiometric type. The 0.5 V zero offset is abso
 
 ### `enableCurrent()`
 ```cpp
-void enableCurrent(uint8_t channel = 1, float sensitivity = APASENSE_DEFAULT_CURR_SENS);
+void enableCurrent(uint8_t channel = 1,
+                   float sensitivity = APASENSE_DEFAULT_CURR_SENS,
+                   float voltageV = 0.0f);
 ```
 Enables AC current measurement via ACS712 on the specified channel.
 
@@ -121,8 +124,11 @@ Enables AC current measurement via ACS712 on the specified channel.
 |-----------|------|---------|-------------|
 | `channel` | uint8_t | 1 | ADS1015 channel (0–3) |
 | `sensitivity` | float | 0.100 | Sensor output in V/A |
+| `voltageV` | float | 0.0 | Mains voltage in volts; 0.0 = power not calculated |
 
 ACS712 sensitivity values: 5 A → 0.185, **20 A → 0.100** (default), 30 A → 0.066.
+
+Use `APASENSE_MAINS_EU` (230 V) or `APASENSE_MAINS_US` (120 V) for the `voltageV` argument.
 
 `getCurrent()` returns −1.0 until the first 32-sample RMS cycle completes (approximately one second at a typical update rate).
 
@@ -178,6 +184,23 @@ On a fresh install, pressure becomes valid after the first pump stop + 30 second
 float getCurrent() const;
 ```
 Returns pump current in amps (true RMS). Returns `−1.0` until the first 32-sample cycle completes after `begin()`.
+
+---
+
+### `getPower()`
+```cpp
+float getPower() const;
+```
+Returns apparent power in VA (volt-amperes): `voltageV × I_rms`.
+
+Returns `−1.0` if:
+- `enableCurrent()` was not called, or
+- current is not yet calibrated (first 32 samples not yet collected), or
+- `voltageV` was not provided (or was 0) in `enableCurrent()`
+
+> **Note:** This is apparent power (VA), not true power (W). True watts ≈ VA × power factor.
+> A pool pump motor typically has a power factor of 0.85–0.95, so the reading may overestimate
+> true consumption by 5–15 %.
 
 ---
 
@@ -318,7 +341,7 @@ Configures the buzzer output pin. Call in `setup()`. The pin is set LOW immediat
 ```cpp
 void setBuzzer(bool on);
 ```
-Turns the buzzer on or off directly. Cancels any pending `beep()` timer.
+Turns the buzzer on or off directly. Cancels any active `alert()` pattern and any pending `beep()` timer.
 
 ---
 
@@ -326,14 +349,63 @@ Turns the buzzer on or off directly. Cancels any pending `beep()` timer.
 ```cpp
 void beep(uint16_t ms);
 ```
-Starts a non-blocking timed beep. The buzzer turns off automatically after `ms` milliseconds, driven by `update()`. Passing `0` is a no-op.
+Starts a non-blocking single beep. The buzzer turns off automatically after `ms` milliseconds, driven by `update()`. Cancels any active `alert()` pattern. Passing `0` is a no-op.
+
+---
+
+### `alert()`
+```cpp
+void alert(BuzzerAlert severity, bool repeat = false);
+```
+Plays a rhythm pattern matched to the alert severity.
+
+| `severity` | Pattern | Cycle |
+|-----------|---------|-------|
+| `BUZZER_INFO` | 1 beep (200 ms on, 800 ms silence) | 1.0 s |
+| `BUZZER_WARNING` | 2 beeps (200 ms · 150 ms gap · 200 ms · 2 s silence) | 2.55 s |
+| `BUZZER_ALARM` | 3 fast beeps (150 ms × 3, 100 ms gaps, 1.5 s silence) | 1.95 s |
+
+- `repeat = false` — plays the pattern once, then stops.
+- `repeat = true` — loops indefinitely until `stopAlert()` is called.
+
+Replaces any currently active pattern or beep immediately.
+
+**Typical APAPUMP alarm usage:**
+```cpp
+pump.setPumpAlarmCallback([](PumpAlarm a) {
+    bool alarm = (a != PUMP_ALARM_NONE);
+    adc.setLed(0, alarm);
+    if (alarm) adc.alert(BUZZER_ALARM, true);
+    else        adc.stopAlert();
+});
+```
+
+---
+
+### `stopAlert()`
+```cpp
+void stopAlert();
+```
+Stops any active repeating alert pattern and turns the buzzer off. Equivalent to `setBuzzer(false)`.
+
+---
+
+## `BuzzerAlert` enum
+
+```cpp
+enum BuzzerAlert : uint8_t {
+    BUZZER_INFO    = 0,   // single beep — informational
+    BUZZER_WARNING = 1,   // double beep — attention required
+    BUZZER_ALARM   = 2    // triple fast beep — action required
+};
+```
 
 ---
 
 ## Constants
 
 ```cpp
-#define            APASENSE_LIB_VERSION            "1.0.0"
+#define            APASENSE_LIB_VERSION            "1.1.0"
 constexpr uint16_t APASENSE_EEPROM_ADDR         = 582;    // start address in EEPROM
 constexpr uint16_t APASENSE_EEPROM_MAGIC        = 0xA5C2;
 constexpr uint8_t  APASENSE_EEPROM_VERSION      = 1;
@@ -342,6 +414,8 @@ constexpr float    APASENSE_ADS_LSB_MV          = 3.0f;   // mV per LSB at ±6.1
 constexpr uint16_t APASENSE_PRESSURE_SETTLE_MS  = 30000;  // ms after pump stop before re-zero
 constexpr float    APASENSE_DEFAULT_MAX_BAR      = 6.9f;   // ≈100 PSI
 constexpr float    APASENSE_DEFAULT_CURR_SENS    = 0.100f; // ACS712-20A: 100 mV/A
+constexpr float    APASENSE_MAINS_EU             = 230.0f; // European mains voltage
+constexpr float    APASENSE_MAINS_US             = 120.0f; // US / Canada mains voltage
 constexpr uint8_t  APASENSE_NO_PCF              = 0xFF;   // disable PCF in constructor
 constexpr uint8_t  APASENSE_NO_BUZZER           = 0xFF;   // buzzer not configured (default)
 ```
@@ -370,7 +444,7 @@ EEPROM is written only when `calibratePressureZero()` runs. On AVR the library u
 | ESP32 / ESP8266 | `EEPROM.begin(600)` is called inside `begin()` — do not call it again in your sketch with a smaller value |
 | ESP32 | `noInterrupts()` only disables interrupts on the calling core — no ISR-safety guarantees for multi-core access |
 | AVR (Uno / Mega) | `snprintf` does not support `%f` — use `dtostrf()` for float formatting in your sketch |
-| All platforms | Call `adc.update()` every `loop()`. Avoid `delay()` — it blocks ADC cycling and the beep/settle timers |
+| All platforms | Call `adc.update()` every `loop()`. Avoid `delay()` — it blocks ADC cycling, buzzer patterns, and the settle timer |
 
 ---
 
