@@ -3,7 +3,7 @@
 # APASENSE
 
 **ADS1015 analog sensing and PCF8574AT I/O library for APA pool automation**
-![Version](https://img.shields.io/badge/version-1.0.0-blue)
+![Version](https://img.shields.io/badge/version-1.1.0-blue)
 ![Platforms](https://img.shields.io/badge/platform-AVR%20%7C%20ESP32%20%7C%20ESP8266%20%7C%20STM32-green)
 
 ---
@@ -13,6 +13,7 @@
 **Sensing (ADS1015, I2C)**
 - Pool pressure — parametric range (any 0.5–4.5 V ratiometric transducer), auto zero-cal
 - Pump current — true AC RMS via non-blocking 32-sample accumulator (ACS712)
+- Pump apparent power — `getPower()` returns V × I_rms; supply mains voltage once in setup
 - Solar irradiance — 0–100 % using user-supplied calibration constants
 - AUX voltage — raw 0–5 V input for any future sensor
 
@@ -21,7 +22,8 @@
 - 4 × status LED outputs (active-low open-drain)
 
 **Indicators**
-- Buzzer — direct Arduino pin, non-blocking timed beep
+- Buzzer — single beep, or three severity-matched rhythm patterns (`BUZZER_INFO / WARNING / ALARM`)
+- Alert patterns repeat until `stopAlert()` — designed for integration with APAPUMP alarm callbacks
 
 **Integration**
 - Designed as the sensor layer for APAPUMP and APADOSE
@@ -51,7 +53,7 @@ lib_extra_dirs = ../APA-SENSE_LIB          ; relative (sibling folder)
 
 APASENSE is the hardware abstraction layer for the analog sensing side of an APA pool controller. It reads four analog inputs via an ADS1015 12-bit ADC, manages binary tank-empty sensors and status LEDs through a PCF8574AT I/O expander, and drives a buzzer. All operations are non-blocking — the library cycles through ADC conversions one at a time in `update()` so the main loop never stalls.
 
-Pressure and current readings are delivered to APAPUMP through callbacks. When the pump stops, APASENSE automatically re-zeroes the pressure transducer after a 30-second settle period and saves the result to EEPROM, so pressure readings are accurate from the very first update() cycle on every subsequent boot.
+Pressure and current readings are delivered to APAPUMP through callbacks. When the pump stops, APASENSE automatically re-zeroes the pressure transducer after a 30-second settle period and saves the result to EEPROM, so pressure readings are accurate from the very first update() cycle on every subsequent boot. If mains voltage is supplied to `enableCurrent()`, `getPower()` returns apparent power in VA. Three built-in buzzer patterns (`BUZZER_INFO`, `BUZZER_WARNING`, `BUZZER_ALARM`) can repeat continuously until `stopAlert()` is called — intended for APAPUMP alarm callbacks.
 
 ---
 
@@ -63,15 +65,15 @@ Pressure and current readings are delivered to APAPUMP through callbacks. When t
 
 ```
 update() called every loop():
-  ┌─────────────────────────────────────────────────────────┐
-  │  1. Beep timer — turn buzzer off if beep period elapsed │
-  │  2. Settle timer — re-zero pressure if 30 s elapsed     │
-  │  3. ADC cycle:                                          │
-  │       conversion pending?                               │
-  │         yes + 1 ms elapsed → read result → process     │
-  │       no pending conversion?                            │
-  │         → find next enabled sensor → start conversion  │
-  └─────────────────────────────────────────────────────────┘
+  ┌────────────────────────────────────────────────────────────┐
+  │  1. Buzzer sequencer — advance pattern step / expire beep  │
+  │  2. Settle timer     — re-zero pressure if 30 s elapsed    │
+  │  3. ADC cycle:                                             │
+  │       conversion pending?                                  │
+  │         yes + 1 ms elapsed → read result → process        │
+  │       no pending conversion?                               │
+  │         → find next enabled sensor → start conversion     │
+  └────────────────────────────────────────────────────────────┘
 ```
 
 Channels cycle in order: pressure → current → AUX → LDR (skipping disabled ones).
@@ -155,8 +157,10 @@ pump.setCurrentCallback([]() { return adc.getCurrent(); });
 pump.setPumpStateCallback([](bool on) { adc.onPumpState(on); });
 
 pump.setPumpAlarmCallback([](PumpAlarm a) {
-    adc.setLed(0, a != PUMP_ALARM_NONE);
-    if (a != PUMP_ALARM_NONE) adc.beep(1000);
+    bool alarm = (a != PUMP_ALARM_NONE);
+    adc.setLed(0, alarm);
+    if (alarm) adc.alert(BUZZER_ALARM, true);   // repeat until cleared
+    else        adc.stopAlert();
 });
 ```
 
@@ -178,11 +182,11 @@ See [docs/API.md](docs/API.md) for the complete method reference.
 |-------|---------|
 | Core | `begin()`, `update()` |
 | ADS channels | `enablePressure()`, `enableCurrent()`, `enableAux()`, `enableLDR()` |
-| Getters | `getPressure()`, `getCurrent()`, `getAuxVoltage()`, `getSolarPct()`, `getRawLDR()` |
+| Getters | `getPressure()`, `getCurrent()`, `getPower()`, `getAuxVoltage()`, `getSolarPct()`, `getRawLDR()` |
 | Pressure cal | `calibratePressureZero()`, `onPumpState()` |
 | Tank sensors | `enableTankSensor()`, `isTankEmpty()` |
 | LEDs | `setLed()`, `getLed()` |
-| Buzzer | `enableBuzzer()`, `setBuzzer()`, `beep()` |
+| Buzzer | `enableBuzzer()`, `setBuzzer()`, `beep()`, `alert()`, `stopAlert()` |
 
 ---
 
@@ -192,8 +196,8 @@ Measured with `examples/01_minimal` (pressure + current enabled).
 
 | Platform | RAM used | Flash used |
 |----------|----------|------------|
-| Arduino Mega 2560 | 467 B / 8 192 B (6 %) | 8 874 B / 253 952 B (3 %) |
-| Arduino Uno | 467 B / 2 048 B (23 %) | 8 092 B / 32 256 B (25 %) |
+| Arduino Mega 2560 | 483 B / 8 192 B (6 %) | 9 064 B / 253 952 B (4 %) |
+| Arduino Uno | 483 B / 2 048 B (24 %) | 8 316 B / 32 256 B (26 %) |
 | ESP32 | 21.9 KB / 320 KB (7 %) | 297 KB / 1.3 MB (23 %) |
 | ESP8266 | 28.7 KB / 80 KB (35 %) | 274 KB / 1.0 MB (26 %) |
 | STM32 (Nucleo F411RE) | 9.7 KB / 128 KB (7 %) | 24 KB / 512 KB (5 %) |
