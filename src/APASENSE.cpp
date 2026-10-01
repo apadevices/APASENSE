@@ -39,13 +39,13 @@ static const BeepStep PATTERN_ALARM[]   PROGMEM = {
     {0, 0}
 };
 
+// Pointer table in PROGMEM, indexed by BuzzerAlert. Not a switch: on AVR, GCC turns a
+// switch returning pointers into a lookup table placed in RAM (6 bytes here, until 1.1.2).
+static const BeepStep* const PATTERNS[] PROGMEM = { PATTERN_INFO, PATTERN_WARNING, PATTERN_ALARM };
+
 static const BeepStep* _patternPtr(uint8_t idx) {
-    switch (idx) {
-        case BUZZER_INFO:    return PATTERN_INFO;
-        case BUZZER_WARNING: return PATTERN_WARNING;
-        case BUZZER_ALARM:   return PATTERN_ALARM;
-        default:             return nullptr;
-    }
+    if (idx > BUZZER_ALARM) return nullptr;
+    return (const BeepStep*)pgm_read_ptr(&PATTERNS[idx]);
 }
 
 static BeepStep _readStep(const BeepStep* pattern, uint8_t step) {
@@ -87,6 +87,7 @@ void ApaSense::_init() {
     _buzzerStep         = 0xFF;
     _buzzerStepEndMs    = 0;
     _settleStartMs      = 0;
+    _settleRefRaw       = 0;
     _adsPendingCh       = 0xFF;
     _adsCh              = 0;
     _adsConvMs16        = 0;
@@ -140,8 +141,26 @@ void ApaSense::update() {
     }
 
     // ── Pressure settle → auto re-zero ───────────────────────────────────────
-    if (_flags.settlePending && now - _settleStartMs >= APASENSE_PRESSURE_SETTLE_MS) {
-        calibratePressureZero();
+    // Reference reading 10 s before the end of the settle; the zero is taken only if the
+    // pressure hasn't moved since. Still moving (leak, slow drain) → wait another settle.
+    if (_flags.settlePending) {
+        uint32_t settled = now - _settleStartMs;
+        if (!_flags.settleRefTaken &&
+            settled >= APASENSE_PRESSURE_SETTLE_MS - APASENSE_PRESSURE_STABLE_MS) {
+            _settleRefRaw = _rawPressure;
+            _flags.settleRefTaken = true;
+            // The check below runs a full STABLE_MS after this reference, even if update()
+            // was not called for a while (a blocked loop would otherwise do both at once).
+            _settleStartMs = now - (APASENSE_PRESSURE_SETTLE_MS - APASENSE_PRESSURE_STABLE_MS);
+        } else if (_flags.settleRefTaken && settled >= APASENSE_PRESSURE_SETTLE_MS) {
+            int16_t drift = _rawPressure - _settleRefRaw;
+            if (drift > APASENSE_PRESSURE_STABLE_COUNTS || drift < -APASENSE_PRESSURE_STABLE_COUNTS) {
+                _settleStartMs = now;
+                _flags.settleRefTaken = false;
+            } else {
+                calibratePressureZero();   // also applies the plausibility window
+            }
+        }
     }
 
     if (!_flags.adsReady) return;
@@ -245,13 +264,17 @@ int16_t ApaSense::getRawLDR() const {
 
 void ApaSense::calibratePressureZero() {
     if (!_flags.pressureEnabled || !_flags.adsReady) return;
+    _flags.settlePending = false;
+    // Far from the transducer's 0.5 V = pressure still trapped in the pipe (closed valve,
+    // check valve, leaking fitting), no reading yet, or no sensor: keep the previous zero.
+    if (!_isPlausibleZero(_rawPressure)) return;
     _pressureZero = _rawPressure;
     _flags.pressureCalibrated = true;
-    _flags.settlePending = false;
     _saveEEPROM();
 }
 
 void ApaSense::onPumpState(bool on) {
+    _flags.settleRefTaken = false;
     if (on) {
         _flags.settlePending = false;
     } else {
@@ -455,9 +478,11 @@ void ApaSense::_loadEEPROM() {
     const uint8_t* p = reinterpret_cast<const uint8_t*>(&d);
     for (uint8_t i = 0; i < sizeof(d) - 1; i++) chk += p[i];
 
+    // Plausibility too: a zero stored by 1.1.1 or older may have been taken under pressure.
     if (d.magic == APASENSE_EEPROM_MAGIC &&
         d.version == APASENSE_EEPROM_VERSION &&
-        d.checksum == chk) {
+        d.checksum == chk &&
+        _isPlausibleZero(d.pressureZero)) {
         _pressureZero = d.pressureZero;
         _flags.pressureCalibrated = true;
     }

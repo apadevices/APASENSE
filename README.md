@@ -3,7 +3,7 @@
 # APASENSE
 
 **ADS1015 analog sensing and PCF8574AT I/O library for APA pool automation**
-![Version](https://img.shields.io/badge/version-1.1.0-blue)
+![Version](https://img.shields.io/badge/version-1.1.2-blue)
 ![Platforms](https://img.shields.io/badge/platform-AVR%20%7C%20ESP32%20%7C%20ESP8266%20%7C%20STM32-green)
 
 ---
@@ -11,7 +11,7 @@
 ## Key Features
 
 **Sensing (ADS1015, I2C)**
-- Pool pressure — parametric range (any 0.5–4.5 V ratiometric transducer), auto zero-cal
+- Pool pressure — parametric range (any 0.5–4.5 V ratiometric transducer), auto zero-cal with plausibility and stability checks
 - Pump current — true AC RMS via non-blocking 32-sample accumulator (ACS712)
 - Pump apparent power — `getPower()` returns V × I_rms; supply mains voltage once in setup
 - Solar irradiance — 0–100 % using user-supplied calibration constants
@@ -28,7 +28,7 @@
 **Integration**
 - Designed as the sensor layer for APAPUMP and APADOSE
 - Callback bridges connect readings to APAPUMP safety engine in four lines
-- Pressure re-zero automatically triggered after every pump stop
+- Pressure re-zero automatically triggered after every pump stop — never taken while pressure is still trapped in the pipe
 - Pure `Wire.h` dependency — no Adafruit or external libraries required
 
 ---
@@ -53,7 +53,7 @@ lib_extra_dirs = ../APA-SENSE_LIB          ; relative (sibling folder)
 
 APASENSE is the hardware abstraction layer for the analog sensing side of an APA pool controller. It reads four analog inputs via an ADS1015 12-bit ADC, manages binary tank-empty sensors and status LEDs through a PCF8574AT I/O expander, and drives a buzzer. All operations are non-blocking — the library cycles through ADC conversions one at a time in `update()` so the main loop never stalls.
 
-Pressure and current readings are delivered to APAPUMP through callbacks. When the pump stops, APASENSE automatically re-zeroes the pressure transducer after a 30-second settle period and saves the result to EEPROM, so pressure readings are accurate from the very first update() cycle on every subsequent boot. If mains voltage is supplied to `enableCurrent()`, `getPower()` returns apparent power in VA. Three built-in buzzer patterns (`BUZZER_INFO`, `BUZZER_WARNING`, `BUZZER_ALARM`) can repeat continuously until `stopAlert()` is called — intended for APAPUMP alarm callbacks.
+Pressure and current readings are delivered to APAPUMP through callbacks. When the pump stops, APASENSE automatically re-zeroes the pressure transducer after a 30-second settle period — only if the reading is steady and close to the transducer's 0 bar output — and saves the result to EEPROM, so pressure readings are accurate from the very first update() cycle on every subsequent boot. If mains voltage is supplied to `enableCurrent()`, `getPower()` returns apparent power in VA. Three built-in buzzer patterns (`BUZZER_INFO`, `BUZZER_WARNING`, `BUZZER_ALARM`) can repeat continuously until `stopAlert()` is called — intended for APAPUMP alarm callbacks.
 
 ---
 
@@ -86,14 +86,28 @@ The pressure transducer outputs 0.5 V at zero pressure and 4.5 V at `maxBar`. Th
 ```
 onPumpState(false) called
         │
-        ▼  wait 30 s (APASENSE_PRESSURE_SETTLE_MS)
+        ▼  wait 20 s ── note the reading (stability reference)
+        ▼  wait 10 s more (30 s total, APASENSE_PRESSURE_SETTLE_MS)
         │
-calibratePressureZero() ── snapshot current ADC reading as zero-pressure reference
-        │
-        └── save to EEPROM (survives reboot)
+reading moved > ~0.02 bar? ── yes ──► still settling (leak, slow drain): wait another 30 s
+        │ no
+        ▼
+calibratePressureZero() ── reading within ±0.2 V of 0.5 V? ── no ──► keep the previous zero
+        │ yes
+        ▼
+new zero-pressure reference ── save to EEPROM (survives reboot)
 ```
 
 If `onPumpState(true)` is called before the 30 s completes, the settle is cancelled — the pump restarted and readings are no longer stable.
+
+**Why the checks matter (added in 1.1.2).** Whatever the library reads at the end of the settle becomes "0 bar". If pressure is still trapped in the pipe — a closed valve, a check valve, a clogged filter, a leaking test fitting — that pressure would be stored as zero and **every later reading would be too low by that amount**: high-pressure protection could miss a real overpressure, and a normal running pressure could read as 0 (false dry-run alarms). Since 1.1.2 a new zero is accepted only if:
+
+- the reading is within **±0.2 V of the transducer's 0.5 V** output (`APASENSE_PRESSURE_ZERO_WINDOW`, about ±0.35 bar with a 6.9 bar sensor), and
+- it changed by no more than **~0.02 bar during the last 10 s** (`APASENSE_PRESSURE_STABLE_COUNTS`).
+
+A rejected zero keeps the previous one (or none on a fresh install). A zero stored by an older version that fails the window is ignored at `begin()`.
+
+> **Installation tip:** the pressure must actually fall to 0 bar after the pump stops. If the filter sits below the water level, the static head (water above the sensor) stays on the sensor: a head under ~0.35 bar is accepted as "zero" and all readings are lower by that amount; a higher head is rejected and no zero is taken at all. Mount the sensor where the pressure drops to 0 when the pump is off.
 
 ### AC current measurement (RMS)
 
@@ -196,8 +210,8 @@ Measured with `examples/01_minimal` (pressure + current enabled).
 
 | Platform | RAM used | Flash used |
 |----------|----------|------------|
-| Arduino Mega 2560 | 483 B / 8 192 B (6 %) | 9 064 B / 253 952 B (4 %) |
-| Arduino Uno | 483 B / 2 048 B (24 %) | 8 316 B / 32 256 B (26 %) |
+| Arduino Mega 2560 | 479 B / 8 192 B (6 %) | 9 216 B / 253 952 B (4 %) |
+| Arduino Uno | 479 B / 2 048 B (23 %) | 8 468 B / 32 256 B (26 %) |
 | ESP32 | 21.9 KB / 320 KB (7 %) | 297 KB / 1.3 MB (23 %) |
 | ESP8266 | 28.7 KB / 80 KB (35 %) | 274 KB / 1.0 MB (26 %) |
 | STM32 (Nucleo F411RE) | 9.7 KB / 128 KB (7 %) | 24 KB / 512 KB (5 %) |

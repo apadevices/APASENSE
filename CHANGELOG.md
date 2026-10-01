@@ -1,5 +1,18 @@
 # Changelog — APASENSE
 
+## [1.1.2] — 2026-10-01
+
+### Fixed
+- **Pressure zero could be taken under pressure.** The automatic re-zero after a pump stop stored whatever the sensor read 30 s later as "0 bar" and saved it to EEPROM. With pressure still trapped in the pipe (closed valve, check valve, clogged filter, leaking fitting), every later reading was too low by that amount: high-pressure protection could miss a real overpressure and a normal running pressure could read 0 (false dry-run alarms). Found on the APA-CONTROLLER bench: a leaking test fitting at 2.2 bar was stored as zero. Now a zero is accepted only if:
+  - the reading is within ±0.2 V of the transducer's 0.5 V zero output (`APASENSE_PRESSURE_ZERO_WINDOW`), and
+  - it held steady (±`APASENSE_PRESSURE_STABLE_COUNTS`, ~0.02 bar) over the last 10 s of the settle; a still-falling pressure restarts the 30 s settle instead.
+  - A rejected zero keeps the previous one. `calibratePressureZero()` applies the same window; a stored zero that fails it is ignored at `begin()`.
+- 6 bytes of RAM on AVR: the buzzer pattern `switch` compiled into a pointer table in RAM — now an explicit `PROGMEM` table.
+
+### Changed
+- RAM: +2 bytes (`_settleRefRaw`), −6 bytes (pattern table) → 4 bytes less on AVR.
+- Docs: pressure zero-calibration section (README), `getPressure()` / `calibratePressureZero()` / `onPumpState()` (API.md), installation tip about sensors below the water level; API.md header and constants block showed version 1.1.0.
+
 ## [1.1.1] — 2026-06-11
 
 ### Added

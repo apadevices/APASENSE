@@ -1,6 +1,6 @@
 # APASENSE — API Reference
 
-**Version 1.1.0** · [GitHub](https://github.com/apadevices/APASENSE)
+**Version 1.1.2** · [GitHub](https://github.com/apadevices/APASENSE)
 
 ---
 
@@ -175,7 +175,7 @@ Returns `−1.0` if:
 - `enablePressure()` was not called, or
 - `calibratePressureZero()` has not yet run (pressure is not calibrated)
 
-On a fresh install, pressure becomes valid after the first pump stop + 30 second settle. On subsequent boots, the stored EEPROM value is used immediately.
+On a fresh install, pressure becomes valid after the first pump stop + 30 second settle (if the zero passes its checks, see `onPumpState()`). On subsequent boots, the stored EEPROM value is used immediately — unless it fails the plausibility window (e.g. a zero stored by an older version while pressure was trapped), in which case it is ignored.
 
 ---
 
@@ -238,6 +238,8 @@ void calibratePressureZero();
 ```
 Captures the current ADS1015 reading as the zero-pressure reference point and saves it to EEPROM. Call only when the pump is off and the system has been at rest for a few seconds.
 
+**Plausibility check (1.1.2):** the reading is accepted only if it is within ±0.2 V (`APASENSE_PRESSURE_ZERO_WINDOW` counts) of the transducer's nominal 0.5 V (`APASENSE_PRESSURE_ZERO_NOMINAL`). Otherwise the call is ignored and the previous zero is kept — the pipe is still under pressure, there is no reading yet (before the first `update()`), or no sensor is connected.
+
 In normal operation you do not need to call this manually — `onPumpState(false)` triggers it automatically after 30 seconds.
 
 ---
@@ -253,7 +255,7 @@ pump.setPumpStateCallback([](bool on) { adc.onPumpState(on); });
 ```
 
 - `on = true`: cancels any pending settle timer (pump restarted)
-- `on = false`: starts the 30-second settle timer; fires `calibratePressureZero()` when it expires
+- `on = false`: starts the 30-second settle timer. At 20 s the reading is noted; at 30 s, if it moved by more than `APASENSE_PRESSURE_STABLE_COUNTS` (~0.02 bar) the pressure is still falling (leak, slow drain) and the timer restarts for another 30 s; if it is steady, `calibratePressureZero()` runs (with its plausibility check).
 
 ---
 
@@ -405,13 +407,17 @@ enum BuzzerAlert : uint8_t {
 ## Constants
 
 ```cpp
-#define            APASENSE_LIB_VERSION            "1.1.0"
+#define            APASENSE_LIB_VERSION            "1.1.2"
 constexpr uint16_t APASENSE_EEPROM_ADDR         = 582;    // start address in EEPROM
 constexpr uint16_t APASENSE_EEPROM_MAGIC        = 0xA5C2;
 constexpr uint8_t  APASENSE_EEPROM_VERSION      = 1;
 constexpr uint8_t  APASENSE_RMS_SAMPLES         = 32;     // samples per RMS calculation
 constexpr float    APASENSE_ADS_LSB_MV          = 3.0f;   // mV per LSB at ±6.144 V gain
 constexpr uint16_t APASENSE_PRESSURE_SETTLE_MS  = 30000;  // ms after pump stop before re-zero
+constexpr int16_t  APASENSE_PRESSURE_ZERO_NOMINAL  = 167;  // counts at 0.5 V (transducer 0 bar)
+constexpr int16_t  APASENSE_PRESSURE_ZERO_WINDOW   = 67;   // accepted zero: nominal ± this (±0.2 V)
+constexpr int16_t  APASENSE_PRESSURE_STABLE_COUNTS = 4;    // max change over the last 10 s (~0.02 bar)
+constexpr uint16_t APASENSE_PRESSURE_STABLE_MS     = 10000; // stability window at the end of the settle
 constexpr float    APASENSE_DEFAULT_MAX_BAR      = 6.9f;   // ≈100 PSI
 constexpr float    APASENSE_DEFAULT_CURR_SENS    = 0.100f; // ACS712-20A: 100 mV/A
 constexpr float    APASENSE_MAINS_EU             = 230.0f; // European mains voltage
@@ -433,7 +439,7 @@ constexpr uint8_t  APASENSE_NO_BUZZER           = 0xFF;   // buzzer not configur
 
 **Total: 6 bytes.** Addresses 532–581 are reserved as an expansion gap for APAPUMP.
 
-EEPROM is written only when `calibratePressureZero()` runs. On AVR the library uses `EEPROM.put()` which only writes bytes that have changed (no unnecessary wear). On ESP32/ESP8266 `EEPROM.commit()` is called automatically.
+EEPROM is written only when `calibratePressureZero()` accepts a new zero. On AVR the library uses `EEPROM.put()` which only writes bytes that have changed (no unnecessary wear). On ESP32/ESP8266 `EEPROM.commit()` is called automatically.
 
 ---
 

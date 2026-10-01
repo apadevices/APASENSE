@@ -2,7 +2,7 @@
 #include <Arduino.h>
 
 // ── Version ──────────────────────────────────────────────────────────────────
-#define APASENSE_LIB_VERSION "1.1.1"
+#define APASENSE_LIB_VERSION "1.1.2"
 
 // ── EEPROM ───────────────────────────────────────────────────────────────────
 // APA EEPROM map: 520–531 APAPUMP | 532–581 APAPUMP reserve | 582–587 APASENSE
@@ -18,6 +18,16 @@ constexpr float    APASENSE_DEFAULT_CURR_SENS = 0.100f; // ACS712-20A: 100 mV/A
 
 // ── Pressure ─────────────────────────────────────────────────────────────────
 constexpr uint16_t APASENSE_PRESSURE_SETTLE_MS = 30000; // settle after pump stop → re-zero
+
+// Zero-point checks (1.1.2). A 0.5–4.5 V transducer outputs 0.5 V at 0 bar (≈167 counts at
+// 3 mV/LSB). A new zero is accepted only within ±0.2 V of that (±67 counts ≈ ±0.35 bar at
+// 6.9 bar full scale) and only if the reading held steady over the last 10 s of the settle
+// wait — pressure still trapped in the pipe (closed valve, check valve, leak) is never
+// stored as "0 bar", which would make every later reading too low.
+constexpr int16_t  APASENSE_PRESSURE_ZERO_NOMINAL  = 167;   // counts at 0.5 V
+constexpr int16_t  APASENSE_PRESSURE_ZERO_WINDOW   = 67;    // ± counts (±0.2 V)
+constexpr int16_t  APASENSE_PRESSURE_STABLE_COUNTS = 4;     // max change over the last 10 s (≈0.02 bar)
+constexpr uint16_t APASENSE_PRESSURE_STABLE_MS     = 10000; // stability window at the end of the settle
 
 // ── Mains voltage helpers ─────────────────────────────────────────────────────
 constexpr float APASENSE_MAINS_EU = 230.0f; // European standard
@@ -66,8 +76,10 @@ public:
     int16_t getRawLDR()     const; // raw ADC count — use in calibration sketch
 
     // ── Pressure calibration ──────────────────────────────────────────────────
-    void calibratePressureZero(); // snapshot current reading as zero; pump must be off
+    void calibratePressureZero(); // snapshot current reading as zero; pump must be off.
+                                  // Ignored (old zero kept) unless the reading is within ±0.2 V of 0.5 V.
     void onPumpState(bool on);    // APAPUMP bridge; triggers settle re-zero on false
+                                  // (30 s after the stop, only once the reading is steady)
 
     // ── PCF tank sensors — bit 0–3 maps to PCF P0–P3 ─────────────────────────
     void enableTankSensor(uint8_t bit, bool activeLow = true);
@@ -125,13 +137,14 @@ private:
 
     // ── Pressure settle ───────────────────────────────────────────────────────
     uint32_t _settleStartMs;
+    int16_t  _settleRefRaw;     // pressure reading 10 s before the re-zero (stability check)
 
     // ── ADC conversion sequencing ─────────────────────────────────────────────
     uint8_t  _adsPendingCh;  // 0xFF = idle; 0-3 = sensor index with conversion in flight
     uint8_t  _adsCh;         // next sensor index to sample (0=pressure,1=current,2=aux,3=ldr)
     uint16_t _adsConvMs16;   // low 16 bits of millis() when conversion was started
 
-    // ── Flags (12 bits = 2 bytes) ─────────────────────────────────────────────
+    // ── Flags (13 bits = 2 bytes) ─────────────────────────────────────────────
     struct {
         bool pressureEnabled    : 1;
         bool currentEnabled     : 1;
@@ -145,6 +158,7 @@ private:
         bool pcfReady           : 1;
         bool buzzerRepeat       : 1; // alert() repeat flag
         bool buzzerOnPhase      : 1; // true = currently in ON phase of a pattern step
+        bool settleRefTaken     : 1; // _settleRefRaw holds this settle's stability reference
     } _flags;
 
     // ── Private helpers ───────────────────────────────────────────────────────
@@ -153,6 +167,10 @@ private:
     uint8_t  _getCurrentCh()  const { return (_chBits >> 2) & 0x03; }
     uint8_t  _getAuxCh()      const { return (_chBits >> 4) & 0x03; }
     uint8_t  _getLdrCh()      const { return (_chBits >> 6) & 0x03; }
+    static bool _isPlausibleZero(int16_t raw) {
+        int16_t d = raw - APASENSE_PRESSURE_ZERO_NOMINAL;
+        return d >= -APASENSE_PRESSURE_ZERO_WINDOW && d <= APASENSE_PRESSURE_ZERO_WINDOW;
+    }
     void     _writeRegister(uint8_t reg, uint16_t value);
     uint16_t _readRegister(uint8_t reg);
     void     _startConversion(uint8_t channel);
