@@ -3,7 +3,7 @@
 # APASENSE
 
 **ADS1015 analog sensing and PCF8574AT I/O library for APA pool automation**
-![Version](https://img.shields.io/badge/version-1.1.2-blue)
+![Version](https://img.shields.io/badge/version-1.2.0-blue)
 ![Platforms](https://img.shields.io/badge/platform-AVR%20%7C%20ESP32%20%7C%20ESP8266%20%7C%20STM32-green)
 
 ---
@@ -22,8 +22,9 @@
 - 4 × status LED outputs (active-low open-drain)
 
 **Indicators**
-- Buzzer — single beep, or three severity-matched rhythm patterns (`BUZZER_INFO / WARNING / ALARM`)
+- Buzzer — single beep, three severity-matched rhythm patterns (`BUZZER_INFO / WARNING / ALARM`) and four Morse letters (`BUZZER_CONFIRM` E, `BUZZER_MORSE_N / W / F`)
 - Alert patterns repeat until `stopAlert()` — designed for integration with APAPUMP alarm callbacks
+- Active or passive buzzer — plain pin for an active buzzer, or your own driver via `setBuzzerDriver()`; optional `ApaSenseTimer3Buzzer.h` drives a passive buzzer on the Mega without `tone()` (keeps Timer2 PWM working)
 
 **Integration**
 - Designed as the sensor layer for APAPUMP and APADOSE
@@ -53,7 +54,7 @@ lib_extra_dirs = ../APA-SENSE_LIB          ; relative (sibling folder)
 
 APASENSE is the hardware abstraction layer for the analog sensing side of an APA pool controller. It reads four analog inputs via an ADS1015 12-bit ADC, manages binary tank-empty sensors and status LEDs through a PCF8574AT I/O expander, and drives a buzzer. All operations are non-blocking — the library cycles through ADC conversions one at a time in `update()` so the main loop never stalls.
 
-Pressure and current readings are delivered to APAPUMP through callbacks. When the pump stops, APASENSE automatically re-zeroes the pressure transducer after a 30-second settle period — only if the reading is steady and close to the transducer's 0 bar output — and saves the result to EEPROM, so pressure readings are accurate from the very first update() cycle on every subsequent boot. If mains voltage is supplied to `enableCurrent()`, `getPower()` returns apparent power in VA. Three built-in buzzer patterns (`BUZZER_INFO`, `BUZZER_WARNING`, `BUZZER_ALARM`) can repeat continuously until `stopAlert()` is called — intended for APAPUMP alarm callbacks.
+Pressure and current readings are delivered to APAPUMP through callbacks. When the pump stops, APASENSE automatically re-zeroes the pressure transducer after a 30-second settle period — only if the reading is steady and close to the transducer's 0 bar output — and saves the result to EEPROM, so pressure readings are accurate from the very first update() cycle on every subsequent boot. If mains voltage is supplied to `enableCurrent()`, `getPower()` returns apparent power in VA. Three built-in buzzer patterns (`BUZZER_INFO`, `BUZZER_WARNING`, `BUZZER_ALARM`) and four Morse letters can repeat continuously until `stopAlert()` is called — intended for APAPUMP alarm callbacks. The buzzer can be an active one on a plain pin or a passive one through a driver function (a Timer3 driver for the Mega is included).
 
 ---
 
@@ -178,6 +179,31 @@ pump.setPumpAlarmCallback([](PumpAlarm a) {
 });
 ```
 
+### Passive buzzer (Mega2560, Timer3)
+
+An **active** buzzer has its own oscillator and sounds on plain DC — `adc.enableBuzzer(pin)` is all it needs. A **passive** (magnetic) buzzer needs a square wave at its rated frequency; on plain DC it only ticks. Use the optional Timer3 driver:
+
+```cpp
+#include <APASENSE.h>
+#include <ApaSenseTimer3Buzzer.h>   // in ONE file only — it defines the Timer3 interrupt
+
+void setup() {
+    timer3Buzzer.begin(6, 4000);            // pin, buzzer's rated frequency (Hz)
+    adc.setBuzzerDriver(timer3Buzzer.set);  // instead of enableBuzzer(); before adc.begin()
+    adc.begin();
+    adc.alert(BUZZER_MORSE_N);              // every beep(), alert() and setBuzzer() now sounds
+}
+```
+
+**Why not `tone()`:** on AVR, Arduino `tone()` uses Timer2, and `tone()`/`noTone()` disconnect the PWM of the Timer2 pins — D9/D10 on the Mega, D3/D11 on the Uno. A pump or LED dimmed on those pins stops on every beep. The Timer3 driver leaves Timer2 alone. In return, nothing else may use Timer3 (Servo on the Mega, TimerThree, `analogWrite()` on D2/D3/D5). Boards without Timer3 (Uno) get a clear compile error — write your own `fn(bool on)` for `setBuzzerDriver()` there. See example `04_passive_buzzer`.
+
+| Pattern | Sound | Suggested meaning |
+|---------|-------|-------------------|
+| `BUZZER_CONFIRM` | Morse E `.` | operator action accepted |
+| `BUZZER_MORSE_N` | Morse N `-.` | normal / all clear |
+| `BUZZER_MORSE_W` | Morse W `.--` | warning |
+| `BUZZER_MORSE_F` | Morse F `..-.` | fault / alarm |
+
 ### Connecting tank sensors to APADOSE
 
 ```cpp
@@ -200,7 +226,8 @@ See [docs/API.md](docs/API.md) for the complete method reference.
 | Pressure cal | `calibratePressureZero()`, `onPumpState()` |
 | Tank sensors | `enableTankSensor()`, `isTankEmpty()` |
 | LEDs | `setLed()`, `getLed()` |
-| Buzzer | `enableBuzzer()`, `setBuzzer()`, `beep()`, `alert()`, `stopAlert()` |
+| Buzzer | `enableBuzzer()`, `setBuzzerDriver()`, `setBuzzer()`, `beep()`, `alert()`, `stopAlert()` |
+| Timer3 driver (optional header) | `timer3Buzzer.begin()`, `timer3Buzzer.set()` |
 
 ---
 
@@ -210,8 +237,8 @@ Measured with `examples/01_minimal` (pressure + current enabled).
 
 | Platform | RAM used | Flash used |
 |----------|----------|------------|
-| Arduino Mega 2560 | 479 B / 8 192 B (6 %) | 9 216 B / 253 952 B (4 %) |
-| Arduino Uno | 479 B / 2 048 B (23 %) | 8 468 B / 32 256 B (26 %) |
+| Arduino Mega 2560 | 481 B / 8 192 B (6 %) | 9 300 B / 253 952 B (4 %) |
+| Arduino Uno | 481 B / 2 048 B (23 %) | 8 552 B / 32 256 B (27 %) |
 | ESP32 | 21.9 KB / 320 KB (7 %) | 297 KB / 1.3 MB (23 %) |
 | ESP8266 | 28.7 KB / 80 KB (35 %) | 274 KB / 1.0 MB (26 %) |
 | STM32 (Nucleo F411RE) | 9.7 KB / 128 KB (7 %) | 24 KB / 512 KB (5 %) |

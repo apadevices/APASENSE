@@ -3,6 +3,8 @@
 
 # ── Class (KEYWORD1) ─────────────────────────────────────────────────────────
 ApaSense	KEYWORD1
+ApaSenseTimer3Buzzer	KEYWORD1
+timer3Buzzer	KEYWORD1
 
 # ── Methods (KEYWORD2) ──────────────────────────────────────────────────────
 begin	KEYWORD2
@@ -28,6 +30,8 @@ setBuzzer	KEYWORD2
 beep	KEYWORD2
 alert	KEYWORD2
 stopAlert	KEYWORD2
+setBuzzerDriver	KEYWORD2
+set	KEYWORD2
 
 # ── Constants (LITERAL1) ─────────────────────────────────────────────────────
 APASENSE_LIB_VERSION	LITERAL1
@@ -53,3 +57,7 @@ BuzzerAlert	LITERAL1
 BUZZER_INFO	LITERAL1
 BUZZER_WARNING	LITERAL1
 BUZZER_ALARM	LITERAL1
+BUZZER_CONFIRM	LITERAL1
+BUZZER_MORSE_N	LITERAL1
+BUZZER_MORSE_W	LITERAL1
+BUZZER_MORSE_F	LITERAL1

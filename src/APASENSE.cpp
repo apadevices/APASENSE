@@ -39,12 +39,39 @@ static const BeepStep PATTERN_ALARM[]   PROGMEM = {
     {0, 0}
 };
 
+// Morse timing: dash = 3 dots, gap inside a letter = 1 dot.
+static constexpr uint16_t MORSE_DOT_MS  = 120;
+static constexpr uint16_t MORSE_DASH_MS = 3 * MORSE_DOT_MS;
+static constexpr uint16_t MORSE_GAP_MS  = MORSE_DOT_MS;
+static constexpr uint16_t MORSE_TAIL_MS = 1500;   // silence after the letter (spaces repeats)
+
+static const BeepStep PATTERN_MORSE_E[] PROGMEM = {   // .
+    {MORSE_DOT_MS, MORSE_TAIL_MS},
+    {0, 0}
+};
+static const BeepStep PATTERN_MORSE_N[] PROGMEM = {   // -.
+    {MORSE_DASH_MS, MORSE_GAP_MS}, {MORSE_DOT_MS, MORSE_TAIL_MS},
+    {0, 0}
+};
+static const BeepStep PATTERN_MORSE_W[] PROGMEM = {   // .--
+    {MORSE_DOT_MS, MORSE_GAP_MS}, {MORSE_DASH_MS, MORSE_GAP_MS}, {MORSE_DASH_MS, MORSE_TAIL_MS},
+    {0, 0}
+};
+static const BeepStep PATTERN_MORSE_F[] PROGMEM = {   // ..-.
+    {MORSE_DOT_MS, MORSE_GAP_MS}, {MORSE_DOT_MS, MORSE_GAP_MS},
+    {MORSE_DASH_MS, MORSE_GAP_MS}, {MORSE_DOT_MS, MORSE_TAIL_MS},
+    {0, 0}
+};
+
 // Pointer table in PROGMEM, indexed by BuzzerAlert. Not a switch: on AVR, GCC turns a
 // switch returning pointers into a lookup table placed in RAM (6 bytes here, until 1.1.2).
-static const BeepStep* const PATTERNS[] PROGMEM = { PATTERN_INFO, PATTERN_WARNING, PATTERN_ALARM };
+static const BeepStep* const PATTERNS[] PROGMEM = {
+    PATTERN_INFO, PATTERN_WARNING, PATTERN_ALARM,
+    PATTERN_MORSE_E, PATTERN_MORSE_N, PATTERN_MORSE_W, PATTERN_MORSE_F
+};
 
 static const BeepStep* _patternPtr(uint8_t idx) {
-    if (idx > BUZZER_ALARM) return nullptr;
+    if (idx > BUZZER_MORSE_F) return nullptr;
     return (const BeepStep*)pgm_read_ptr(&PATTERNS[idx]);
 }
 
@@ -86,6 +113,7 @@ void ApaSense::_init() {
     _buzzerPattern      = 0xFF;
     _buzzerStep         = 0xFF;
     _buzzerStepEndMs    = 0;
+    _buzzerDriver       = nullptr;
     _settleStartMs      = 0;
     _settleRefRaw       = 0;
     _adsPendingCh       = 0xFF;
@@ -136,7 +164,7 @@ void ApaSense::update() {
         } else if (_buzzerStepEndMs && (int32_t)(now - _buzzerStepEndMs) >= 0) {
             // Simple beep — turn off when timer expires
             _buzzerStepEndMs = 0;
-            digitalWrite(_buzzerPin, LOW);
+            _buzzerOut(false);
         }
     }
 
@@ -332,12 +360,19 @@ void ApaSense::enableBuzzer(uint8_t pin) {
     digitalWrite(pin, LOW);
 }
 
+void ApaSense::setBuzzerDriver(void (*fn)(bool on)) {
+    if (!fn) return;
+    _buzzerDriver = fn;
+    _flags.buzzerEnabled = true;
+    fn(false);
+}
+
 void ApaSense::setBuzzer(bool on) {
     if (!_flags.buzzerEnabled) return;
     _buzzerPattern   = 0xFF;
     _buzzerStep      = 0xFF;
     _buzzerStepEndMs = 0;
-    digitalWrite(_buzzerPin, on ? HIGH : LOW);
+    _buzzerOut(on);
 }
 
 void ApaSense::beep(uint16_t ms) {
@@ -345,7 +380,7 @@ void ApaSense::beep(uint16_t ms) {
     _buzzerPattern   = 0xFF;   // cancel any active pattern
     _buzzerStep      = 0xFF;
     _buzzerStepEndMs = millis() + ms;
-    digitalWrite(_buzzerPin, HIGH);
+    _buzzerOut(true);
 }
 
 void ApaSense::alert(BuzzerAlert severity, bool repeat) {
@@ -360,14 +395,14 @@ void ApaSense::alert(BuzzerAlert severity, bool repeat) {
     _flags.buzzerRepeat   = repeat;
     _flags.buzzerOnPhase  = true;
     _buzzerStepEndMs      = millis() + first.onMs;
-    digitalWrite(_buzzerPin, HIGH);
+    _buzzerOut(true);
 }
 
 void ApaSense::stopAlert() {
     _buzzerPattern   = 0xFF;
     _buzzerStep      = 0xFF;
     _buzzerStepEndMs = 0;
-    if (_flags.buzzerEnabled) digitalWrite(_buzzerPin, LOW);
+    if (_flags.buzzerEnabled) _buzzerOut(false);
 }
 
 // ── Private: buzzer pattern sequencer ────────────────────────────────────────
@@ -378,7 +413,7 @@ void ApaSense::_advanceBuzzerPattern(uint32_t now) {
 
     if (_flags.buzzerOnPhase) {
         // ON phase complete → start OFF phase for this step
-        digitalWrite(_buzzerPin, LOW);
+        _buzzerOut(false);
         _flags.buzzerOnPhase = false;
         BeepStep s = _readStep(pat, _buzzerStep);
         _buzzerStepEndMs = now + s.offMs;
@@ -393,7 +428,7 @@ void ApaSense::_advanceBuzzerPattern(uint32_t now) {
                 s = _readStep(pat, 0);
                 _flags.buzzerOnPhase = true;
                 _buzzerStepEndMs = now + s.onMs;
-                digitalWrite(_buzzerPin, HIGH);
+                _buzzerOut(true);
             } else {
                 stopAlert();
             }
@@ -401,9 +436,14 @@ void ApaSense::_advanceBuzzerPattern(uint32_t now) {
             // Start next step's ON phase
             _flags.buzzerOnPhase = true;
             _buzzerStepEndMs = now + s.onMs;
-            digitalWrite(_buzzerPin, HIGH);
+            _buzzerOut(true);
         }
     }
+}
+
+void ApaSense::_buzzerOut(bool on) {
+    if (_buzzerDriver) _buzzerDriver(on);
+    else               digitalWrite(_buzzerPin, on ? HIGH : LOW);
 }
 
 // ── Private: I2C helpers ──────────────────────────────────────────────────────

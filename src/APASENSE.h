@@ -2,7 +2,7 @@
 #include <Arduino.h>
 
 // ── Version ──────────────────────────────────────────────────────────────────
-#define APASENSE_LIB_VERSION "1.1.2"
+#define APASENSE_LIB_VERSION "1.2.0"
 
 // ── EEPROM ───────────────────────────────────────────────────────────────────
 // APA EEPROM map: 520–531 APAPUMP | 532–581 APAPUMP reserve | 582–587 APASENSE
@@ -38,10 +38,15 @@ constexpr uint8_t APASENSE_NO_PCF    = 0xFF; // pcfAddr=0xFF → no PCF hardware
 constexpr uint8_t APASENSE_NO_BUZZER = 0xFF; // buzzerPin=0xFF → buzzer not configured
 
 // ── Buzzer alert severity ─────────────────────────────────────────────────────
+// Morse patterns (1.2.0): dot 120 ms, dash 3 dots, 1-dot gap inside a letter, 1.5 s silence after.
 enum BuzzerAlert : uint8_t {
     BUZZER_INFO    = 0, // single beep  (200ms on · 800ms off)
     BUZZER_WARNING = 1, // double beep  (200ms·150ms gap·200ms · 2s silence)
-    BUZZER_ALARM   = 2  // triple beep  (150ms×3 · 100ms gaps · 1.5s silence)
+    BUZZER_ALARM   = 2, // triple beep  (150ms×3 · 100ms gaps · 1.5s silence)
+    BUZZER_CONFIRM = 3, // Morse E  .     — operator action accepted
+    BUZZER_MORSE_N = 4, // Morse N  -.    — normal
+    BUZZER_MORSE_W = 5, // Morse W  .--   — warning
+    BUZZER_MORSE_F = 6  // Morse F  ..-.  — fault / alarm
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -90,8 +95,10 @@ public:
     bool getLed(uint8_t index) const;    // returns commanded state
 
     // ── Buzzer ────────────────────────────────────────────────────────────────
-    void enableBuzzer(uint8_t pin);
-    void setBuzzer(bool on);                            // direct on/off; cancels any pattern
+    void enableBuzzer(uint8_t pin);                     // active buzzer: pin HIGH = sound
+    void setBuzzerDriver(void (*fn)(bool on));          // passive buzzer: fn(true) starts a tone,
+                                                        // fn(false) stops it; replaces the pin
+    void setBuzzer(bool on);                           // direct on/off; cancels any pattern
     void beep(uint16_t ms);                             // non-blocking single beep; 0 = no-op
     void alert(BuzzerAlert severity, bool repeat = false); // play rhythm pattern
     void stopAlert();                                   // stop repeating pattern
@@ -134,6 +141,7 @@ private:
     uint8_t  _buzzerPattern;    // active pattern index (BuzzerAlert), 0xFF = none
     uint8_t  _buzzerStep;       // current step within pattern, 0xFF = idle/simple-beep mode
     uint32_t _buzzerStepEndMs;  // end time for current step (on or off phase)
+    void   (*_buzzerDriver)(bool on); // nullptr = drive _buzzerPin with digitalWrite
 
     // ── Pressure settle ───────────────────────────────────────────────────────
     uint32_t _settleStartMs;
@@ -180,4 +188,5 @@ private:
     void     _loadEEPROM();
     void     _saveEEPROM();
     void     _advanceBuzzerPattern(uint32_t now); // drives pattern step sequencer
+    void     _buzzerOut(bool on);                 // driver if set, else digitalWrite(_buzzerPin)
 };

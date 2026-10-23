@@ -1,6 +1,6 @@
 # APASENSE — API Reference
 
-**Version 1.1.2** · [GitHub](https://github.com/apadevices/APASENSE)
+**Version 1.2.0** · [GitHub](https://github.com/apadevices/APASENSE)
 
 ---
 
@@ -36,7 +36,7 @@ Always follow this order in `setup()`:
 |------|------|-----|
 | 1 | `adc.enablePressure()` etc. | Sets channel assignments and parameters |
 | 2 | `adc.enableTankSensor()` etc. | Arms PCF inputs with correct polarity |
-| 3 | `adc.enableBuzzer(pin)` | Configures output pin |
+| 3 | `adc.enableBuzzer(pin)` — or `timer3Buzzer.begin(pin, hz)` + `adc.setBuzzerDriver(timer3Buzzer.set)` | Configures the buzzer (active on a pin, or passive through a driver) |
 | 4 | `adc.begin()` | Starts Wire, inits PCF, auto-zeroes current |
 | 5 | Wire APAPUMP callbacks | `pump.enablePressure([](){...})` etc. |
 
@@ -335,7 +335,19 @@ Returns the commanded state of the LED (not a hardware readback). `true` = LED i
 ```cpp
 void enableBuzzer(uint8_t pin);
 ```
-Configures the buzzer output pin. Call in `setup()`. The pin is set LOW immediately (buzzer off).
+Configures the buzzer output pin for an **active** buzzer (sounds while the pin is HIGH). Call in `setup()`. The pin is set LOW immediately (buzzer off).
+
+---
+
+### `setBuzzerDriver()`
+```cpp
+void setBuzzerDriver(void (*fn)(bool on));
+```
+The buzzer is switched by calling `fn(true)` / `fn(false)` instead of writing a pin — for a **passive** buzzer that needs a tone generator. Setting a driver enables the buzzer (no `enableBuzzer()` needed) and calls `fn(false)` once. If a pin was also configured, the driver wins. `nullptr` is ignored. `fn` is called from `update()`, `beep()`, `alert()`, `setBuzzer()` and `stopAlert()` — never from an interrupt.
+
+```cpp
+adc.setBuzzerDriver(timer3Buzzer.set);   // see ApaSenseTimer3Buzzer below
+```
 
 ---
 
@@ -366,6 +378,12 @@ Plays a rhythm pattern matched to the alert severity.
 | `BUZZER_INFO` | 1 beep (200 ms on, 800 ms silence) | 1.0 s |
 | `BUZZER_WARNING` | 2 beeps (200 ms · 150 ms gap · 200 ms · 2 s silence) | 2.55 s |
 | `BUZZER_ALARM` | 3 fast beeps (150 ms × 3, 100 ms gaps, 1.5 s silence) | 1.95 s |
+| `BUZZER_CONFIRM` | Morse E `.` | 1.62 s |
+| `BUZZER_MORSE_N` | Morse N `-.` | 2.10 s |
+| `BUZZER_MORSE_W` | Morse W `.--` | 2.58 s |
+| `BUZZER_MORSE_F` | Morse F `..-.` | 2.58 s |
+
+Morse timing: dot 120 ms, dash 360 ms, 120 ms gap inside a letter, 1.5 s silence after the letter (included in the cycle).
 
 - `repeat = false` — plays the pattern once, then stops.
 - `repeat = true` — loops indefinitely until `stopAlert()` is called.
@@ -398,16 +416,40 @@ Stops any active repeating alert pattern and turns the buzzer off. Equivalent to
 enum BuzzerAlert : uint8_t {
     BUZZER_INFO    = 0,   // single beep — informational
     BUZZER_WARNING = 1,   // double beep — attention required
-    BUZZER_ALARM   = 2    // triple fast beep — action required
+    BUZZER_ALARM   = 2,   // triple fast beep — action required
+    BUZZER_CONFIRM = 3,   // Morse E  .     — operator action accepted
+    BUZZER_MORSE_N = 4,   // Morse N  -.    — normal
+    BUZZER_MORSE_W = 5,   // Morse W  .--   — warning
+    BUZZER_MORSE_F = 6    // Morse F  ..-.  — fault / alarm
 };
 ```
+
+---
+
+## `ApaSenseTimer3Buzzer` (optional header, AVR with Timer3)
+
+```cpp
+#include <ApaSenseTimer3Buzzer.h>   // include in ONE .cpp/.ino only — defines the Timer3 ISR
+
+timer3Buzzer.begin(uint8_t pin, uint16_t hz);   // pin OUTPUT LOW, Timer3 set to hz, timer stopped
+timer3Buzzer.set(bool on);                      // start / stop the tone; pin ends LOW
+```
+
+Square-wave driver for a passive buzzer on boards with Timer3 (Arduino Mega2560). Timer3 runs in CTC mode (prescaler 8); its compare-A interrupt toggles the pin. `hz` range about 16 Hz – 65 kHz; use the buzzer's rated frequency (e.g. 4000). Pass `timer3Buzzer.set` to `setBuzzerDriver()`.
+
+- Timer3's PWM outputs (Mega D2/D3/D5) are not connected — inputs on those pins (e.g. encoders on INT4/INT5) keep working.
+- Timer2 is not touched — unlike Arduino `tone()`, which disconnects the PWM of D9/D10 (Mega) / D3/D11 (Uno).
+- Nothing else may use Timer3: no Servo library on the Mega, no TimerThree, no `analogWrite()` on D2/D3/D5.
+- `set()` before `begin()` does nothing; `set(true)` while sounding does nothing.
+- CPU: one short interrupt per half-period (~2 % at 4 kHz) only while sounding.
+- RAM: 5 bytes. On a board without Timer3 the header stops the build with `#error`.
 
 ---
 
 ## Constants
 
 ```cpp
-#define            APASENSE_LIB_VERSION            "1.1.2"
+#define            APASENSE_LIB_VERSION            "1.2.0"
 constexpr uint16_t APASENSE_EEPROM_ADDR         = 582;    // start address in EEPROM
 constexpr uint16_t APASENSE_EEPROM_MAGIC        = 0xA5C2;
 constexpr uint8_t  APASENSE_EEPROM_VERSION      = 1;
@@ -450,6 +492,7 @@ EEPROM is written only when `calibratePressureZero()` accepts a new zero. On AVR
 | ESP32 / ESP8266 | `EEPROM.begin(600)` is called inside `begin()` — do not call it again in your sketch with a smaller value |
 | ESP32 | `noInterrupts()` only disables interrupts on the calling core — no ISR-safety guarantees for multi-core access |
 | AVR (Uno / Mega) | `snprintf` does not support `%f` — use `dtostrf()` for float formatting in your sketch |
+| AVR (Uno / Mega) | Arduino `tone()` uses Timer2 and disconnects PWM on D9/D10 (Mega) / D3/D11 (Uno) — for a passive buzzer on the Mega use `ApaSenseTimer3Buzzer.h` |
 | All platforms | Call `adc.update()` every `loop()`. Avoid `delay()` — it blocks ADC cycling, buzzer patterns, and the settle timer |
 
 ---

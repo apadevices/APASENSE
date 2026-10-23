@@ -1,5 +1,17 @@
 # Changelog — APASENSE
 
+## [1.2.0] — 2026-10-23
+
+### Added
+- **Morse patterns** for `alert()`: `BUZZER_CONFIRM` (E `.`), `BUZZER_MORSE_N` (`-.`), `BUZZER_MORSE_W` (`.--`), `BUZZER_MORSE_F` (`..-.`). Dot 120 ms, dash 3 dots, 1-dot gap inside a letter, 1.5 s silence after. Stored in PROGMEM — no RAM. `BUZZER_INFO / WARNING / ALARM` are unchanged.
+- **`setBuzzerDriver(fn)`** — the buzzer is switched by your function `fn(bool on)` instead of `digitalWrite()`. Needed for a **passive** (magnetic) buzzer, which only ticks on plain DC. Setting a driver enables the buzzer; no pin is needed.
+- **`ApaSenseTimer3Buzzer.h`** — optional, header-only passive-buzzer driver for AVR boards with Timer3 (Mega2560): `timer3Buzzer.begin(pin, hz)` + `adc.setBuzzerDriver(timer3Buzzer.set)`. Timer3 CTC compare interrupt toggles the pin; Timer3's PWM pins (D2/D3/D5) stay disconnected. Not `tone()`: on AVR `tone()` uses Timer2 and disconnects the PWM of D9/D10 (Mega) or D3/D11 (Uno). Stops the build with a clear `#error` on boards without Timer3. Include it in one file only (it defines the ISR). 5 bytes of RAM, only when included.
+- Example `04_passive_buzzer` (Mega2560) — plays every pattern on a passive buzzer.
+
+### Changed
+- All buzzer output goes through one private `_buzzerOut()` (driver or pin). `enableBuzzer(pin)` behaves exactly as before.
+- RAM: +2 bytes (driver pointer).
+
 ## [1.1.2] — 2026-10-01
 
 ### Fixed
